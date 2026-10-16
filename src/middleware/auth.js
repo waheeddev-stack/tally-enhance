@@ -1,5 +1,5 @@
 import jwt from 'jsonwebtoken';
-import { db } from '../db.js';
+import { dbGet, dbRun } from '../db.js';
 
 const SECRET = () => process.env.JWT_SECRET || 'dev-only-change-me-long-random-string';
 
@@ -7,13 +7,13 @@ export function signToken(user) {
   return jwt.sign({ uid: user.id, tv: user.token_version || 1 }, SECRET(), { expiresIn: process.env.JWT_EXPIRES_IN || '8h' });
 }
 
-export function authRequired(req, res, next) {
+export async function authRequired(req, res, next) {
   const h = req.headers.authorization || '';
   const tok = h.startsWith('Bearer ') ? h.slice(7) : null;
   if (!tok) return res.status(401).json({ error: 'Login required' });
   try {
     const payload = jwt.verify(tok, SECRET());
-    const user = db.prepare('SELECT * FROM users WHERE id=?').get(payload.uid);
+    const user = await dbGet('SELECT * FROM users WHERE id=?', [payload.uid]);
     if (!user) return res.status(401).json({ error: 'User not found' });
     if (!user.active) return res.status(403).json({ error: 'Account inactive' });
     if (user.expires_on && user.expires_on < new Date().toISOString().slice(0, 10))
@@ -62,9 +62,10 @@ export function requirePermission(perm) {
   };
 }
 
-export function audit(entity, entity_id, action, actor, diff) {
+export async function audit(entity, entity_id, action, actor, diff) {
+  // Fire-and-forget safe: never throws, so callers don't need to await it.
   try {
-    db.prepare('INSERT INTO audit_log(id,entity,entity_id,action,actor,diff_json) VALUES(?,?,?,?,?,?)')
-      .run(crypto.randomUUID(), entity, entity_id, action, actor, JSON.stringify(diff ?? null));
+    await dbRun('INSERT INTO audit_log(id,entity,entity_id,action,actor,diff_json) VALUES(?,?,?,?,?,?)',
+      [crypto.randomUUID(), entity, entity_id, action, actor, JSON.stringify(diff ?? null)]);
   } catch {}
 }

@@ -97,7 +97,8 @@ CREATE TABLE IF NOT EXISTS anomalies (
   severity TEXT,
   message TEXT,
   field_ref TEXT,
-  resolved_at TEXT
+  resolved_at TEXT,
+  created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
 );
 
 CREATE TABLE IF NOT EXISTS users (

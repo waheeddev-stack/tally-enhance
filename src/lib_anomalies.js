@@ -1,9 +1,9 @@
 // Deterministic anomaly engine — PRD section 11.3. LLM only explains; rules decide.
-import { db } from './db.js';
+import { dbGet, dbAll, dbPrepare } from './db.js';
 import { validateGSTIN, validRatesForHSN } from './lib_gstin.js';
 import { randomUUID } from 'node:crypto';
 
-export function runAnomalies(voucher, lines = [], opts = {}) {
+export async function runAnomalies(voucher, lines = [], opts = {}) {
   const flags = [];
   const push = (rule_code, severity, message, field_ref = '') =>
     flags.push({ id: randomUUID(), voucher_id: voucher.id ?? null, bill_id: voucher.bill_id ?? null, rule_code, severity, message, field_ref });
@@ -13,14 +13,14 @@ export function runAnomalies(voucher, lines = [], opts = {}) {
 
   // duplicate invoice: same vendor + invoice no (narration/number), or vendor+amount+date±3d
   if (voucher.party_ledger_id && voucher.number) {
-    const dup = db.prepare(
-      `SELECT id FROM vouchers WHERE company_id=? AND party_ledger_id=? AND number=? AND id<>? AND status<>'cancelled' LIMIT 1`
-    ).get(companyId, voucher.party_ledger_id, voucher.number, voucher.id || 'none');
+    const dup = await dbGet(
+      `SELECT id FROM vouchers WHERE company_id=? AND party_ledger_id=? AND number=? AND id<>? AND status<>'cancelled' LIMIT 1`,
+      [companyId, voucher.party_ledger_id, voucher.number, voucher.id || 'none']);
     if (dup) push('duplicate_invoice', 'high', `Duplicate invoice no. ${voucher.number} for this vendor.`, 'number');
     else if (voucher.total) {
-      const near = db.prepare(
-        `SELECT id FROM vouchers WHERE company_id=? AND party_ledger_id=? AND ABS(total-?)<0.01 AND ABS(julianday(date)-julianday(?))<=3 AND id<>? AND status<>'cancelled' LIMIT 1`
-      ).get(companyId, voucher.party_ledger_id, voucher.total, voucher.date, voucher.id || 'none');
+      const near = await dbGet(
+        `SELECT id FROM vouchers WHERE company_id=? AND party_ledger_id=? AND ABS(total-?)<0.01 AND ABS(julianday(date)-julianday(?))<=3 AND id<>? AND status<>'cancelled' LIMIT 1`,
+        [companyId, voucher.party_ledger_id, voucher.total, voucher.date, voucher.id || 'none']);
       if (near) push('duplicate_invoice', 'high', 'Same vendor, amount and date (±3 days) already exists — possible duplicate.', 'total');
     }
   }
@@ -50,7 +50,7 @@ export function runAnomalies(voucher, lines = [], opts = {}) {
   }
   // unusual amount: > mean + 3σ for vendor
   if (voucher.party_ledger_id && voucher.total) {
-    const rows = db.prepare(`SELECT total FROM vouchers WHERE company_id=? AND party_ledger_id=? AND status='approved' LIMIT 50`).all(companyId, voucher.party_ledger_id);
+    const rows = await dbAll(`SELECT total FROM vouchers WHERE company_id=? AND party_ledger_id=? AND status='approved' LIMIT 50`, [companyId, voucher.party_ledger_id]);
     if (rows.length >= 5) {
       const vals = rows.map(r => r.total);
       const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
@@ -69,7 +69,7 @@ export function runAnomalies(voucher, lines = [], opts = {}) {
 }
 
 export function persistAnomalies(flags) {
-  const ins = db.prepare(`INSERT INTO anomalies(id,voucher_id,bill_id,rule_code,severity,message,field_ref) VALUES(?,?,?,?,?,?,?)`);
-  const del = voucherId => db.prepare('DELETE FROM anomalies WHERE voucher_id=?').run(voucherId);
+  const ins = dbPrepare(`INSERT INTO anomalies(id,voucher_id,bill_id,rule_code,severity,message,field_ref,created_at) VALUES(?,?,?,?,?,?,?,?)`);
+  const del = voucherId => dbPrepare('DELETE FROM anomalies WHERE voucher_id=?').run(voucherId);
   return { ins, del };
 }

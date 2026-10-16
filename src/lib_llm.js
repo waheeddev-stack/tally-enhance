@@ -18,23 +18,23 @@ const GROQ_MODEL = () => process.env.GROQ_MODEL || 'openai/gpt-oss-120b';
 const OR_MODEL = () => process.env.OPENROUTER_MODEL || 'qwen/qwen2.5-vl-72b-instruct:free';
 const KAGGLE_MODEL = () => process.env.LLM_MODEL || 'tally-vl';
 const timeoutMs = () => Number(process.env.LLM_TIMEOUT_MS) || 60000;
-const baseUrl = () => (getSetting('llm_base_url') || process.env.LLM_BASE_URL_BOOTSTRAP || '').replace(/\/$/, '');
+const baseUrl = async () => (await getSetting('llm_base_url') || process.env.LLM_BASE_URL_BOOTSTRAP || '').replace(/\/$/, '');
 
-export function llmStatus() {
+export async function llmStatus() {
   return {
     providers: chain(),
-    last_source: getSetting('llm_last_source') || null,
-    base_url: baseUrl() || null, // kaggle tunnel when registered
-    online: getSetting('llm_online') === '1',
-    latency_ms: getSetting('llm_latency_ms') ? Number(getSetting('llm_latency_ms')) : null,
-    checked_at: getSetting('llm_checked_at') || null,
-    tunnel_updated_at: getSetting('llm_updated_at') || null,
+    last_source: await getSetting('llm_last_source') || null,
+    base_url: await baseUrl() || null, // kaggle tunnel when registered
+    online: await getSetting('llm_online') === '1',
+    latency_ms: await getSetting('llm_latency_ms') ? Number(await getSetting('llm_latency_ms')) : null,
+    checked_at: await getSetting('llm_checked_at') || null,
+    tunnel_updated_at: await getSetting('llm_updated_at') || null,
   };
 }
 
 // Lightweight reachability probe for the background checker (kaggle tunnel only).
 export async function pingLlm(ms = 8000) {
-  const base = baseUrl();
+  const base = await baseUrl();
   if (!base) return { ok: false, reason: 'no tunnel registered' };
   const t0 = Date.now();
   try {
@@ -197,22 +197,22 @@ function coerceTextSql(j, question) {
 // ---------- chain runner ----------
 const SUPPORTED = ['gemini', 'groq', 'openrouter', 'kaggle'];
 const VISION_OK = { gemini: true, openrouter: true, kaggle: true, groq: false }; // groq free tier: text only
-function providerReady(p) {
+async function providerReady(p) {
   if (p === 'gemini') return !!process.env.GEMINI_API_KEY;
   if (p === 'groq') return !!process.env.GROQ_API_KEY;
   if (p === 'openrouter') return !!process.env.OPENROUTER_API_KEY;
-  if (p === 'kaggle') return !!baseUrl();
+  if (p === 'kaggle') return !!(await baseUrl());
   return false;
 }
 
 async function runChain(kind, fn) {
   const errs = [];
   for (const p of chain()) {
-    if (!SUPPORTED.includes(p) || !providerReady(p)) continue;
+    if (!SUPPORTED.includes(p) || !await providerReady(p)) continue;
     if (kind === 'extract' && !VISION_OK[p]) continue; // e.g. groq can't read bill photos
     try {
       const out = await fn(p);
-      try { setSetting('llm_last_source', p); } catch {}
+      try { await setSetting('llm_last_source', p); } catch {}
       return { out, source: p };
     } catch (e) {
       errs.push(`${p}: ${errMsg(e)}`);
@@ -224,7 +224,7 @@ async function runChain(kind, fn) {
 export async function aiExtract({ imageBase64, mime, ocrText }) {
   return runChain('extract', async p => {
     if (p === 'gemini') return coerceExtraction(parseJson(await geminiCall({ system: EXTRACT_SYSTEM, text: 'Extract this bill as JSON.' + ocrBlock(ocrText), imageBase64, mime, json: true, maxTokens: 2000 })));
-    if (p === 'kaggle') return coerceExtraction(parseJson(await openaiChat({ base: baseUrl(), key: process.env.LLM_API_KEY || '', modelName: KAGGLE_MODEL(), messages: visionMessages(imageBase64, mime, ocrText), json: true, maxTokens: 2000 })));
+    if (p === 'kaggle') return coerceExtraction(parseJson(await openaiChat({ base: await baseUrl(), key: process.env.LLM_API_KEY || '', modelName: KAGGLE_MODEL(), messages: visionMessages(imageBase64, mime, ocrText), json: true, maxTokens: 2000 })));
     // openrouter
     return coerceExtraction(parseJson(await openaiChat({ base: 'https://openrouter.ai/api', key: process.env.OPENROUTER_API_KEY || '', modelName: OR_MODEL(), messages: visionMessages(imageBase64, mime, ocrText), json: true, maxTokens: 2000, referer: true })));
   });
@@ -237,7 +237,7 @@ export async function aiExtractText(ocrText) {
   const user = `Extract this bill from its text (no photo available):\n\n${text}`;
   return runChain('text-extract', async p => {
     if (p === 'gemini') return coerceExtraction(parseJson(await geminiCall({ system: EXTRACT_SYSTEM, text: user, json: true, maxTokens: 2000 })));
-    const base = p === 'groq' ? 'https://api.groq.com/openai' : p === 'kaggle' ? baseUrl() : 'https://openrouter.ai/api';
+    const base = p === 'groq' ? 'https://api.groq.com/openai' : p === 'kaggle' ? await baseUrl() : 'https://openrouter.ai/api';
     const key = p === 'groq' ? (process.env.GROQ_API_KEY || '') : p === 'kaggle' ? (process.env.LLM_API_KEY || '') : (process.env.OPENROUTER_API_KEY || '');
     const modelName = p === 'groq' ? GROQ_MODEL() : p === 'kaggle' ? KAGGLE_MODEL() : OR_MODEL();
     return coerceExtraction(parseJson(await openaiChat({ base, key, modelName, messages: [{ role: 'system', content: EXTRACT_SYSTEM }, { role: 'user', content: user }], json: true, maxTokens: 2000, referer: p === 'openrouter' })));
@@ -249,7 +249,7 @@ export async function aiChat(question, ctx, correction) {
   return runChain('chat', async p => {
     if (p === 'gemini') return coerceTextSql(parseJson(await geminiCall({ system: textSqlSystem(ctx), text: ask(question), json: true, maxTokens: 1500 })), question);
     if (p === 'groq') return coerceTextSql(parseJson(await openaiChat({ base: 'https://api.groq.com/openai', key: process.env.GROQ_API_KEY || '', modelName: GROQ_MODEL(), messages: [{ role: 'system', content: textSqlSystem(ctx) }, { role: 'user', content: ask(question) }], json: true, maxTokens: 800 })), question);
-    if (p === 'kaggle') return coerceTextSql(parseJson(await openaiChat({ base: baseUrl(), key: process.env.LLM_API_KEY || '', modelName: KAGGLE_MODEL(), messages: [{ role: 'system', content: textSqlSystem(ctx) }, { role: 'user', content: ask(question) }], json: true, maxTokens: 800 })), question);
+    if (p === 'kaggle') return coerceTextSql(parseJson(await openaiChat({ base: await baseUrl(), key: process.env.LLM_API_KEY || '', modelName: KAGGLE_MODEL(), messages: [{ role: 'system', content: textSqlSystem(ctx) }, { role: 'user', content: ask(question) }], json: true, maxTokens: 800 })), question);
     // openrouter
     return coerceTextSql(parseJson(await openaiChat({ base: 'https://openrouter.ai/api', key: process.env.OPENROUTER_API_KEY || '', modelName: OR_MODEL(), messages: [{ role: 'system', content: textSqlSystem(ctx) }, { role: 'user', content: ask(question) }], json: true, maxTokens: 800, referer: true })), question);
   });
@@ -260,7 +260,7 @@ export async function aiSummary(title, rows) {  const sample = JSON.stringify((r
     const sys = 'Answer in one or two plain sentences for a shop owner. Reply with plain text only, no JSON.';
     const user = `${title}. Data: ${sample}`;
     if (p === 'gemini') return (await geminiCall({ system: sys, text: user, maxTokens: 1000 })).trim().slice(0, 400);
-    const base = p === 'groq' ? 'https://api.groq.com/openai' : p === 'kaggle' ? baseUrl() : 'https://openrouter.ai/api';
+    const base = p === 'groq' ? 'https://api.groq.com/openai' : p === 'kaggle' ? await baseUrl() : 'https://openrouter.ai/api';
     const key = p === 'groq' ? (process.env.GROQ_API_KEY || '') : p === 'kaggle' ? (process.env.LLM_API_KEY || '') : (process.env.OPENROUTER_API_KEY || '');
     const modelName = p === 'groq' ? GROQ_MODEL() : p === 'kaggle' ? KAGGLE_MODEL() : OR_MODEL();
     return (await openaiChat({ base, key, modelName, messages: [{ role: 'system', content: sys }, { role: 'user', content: user }], maxTokens: 200, referer: p === 'openrouter' })).trim().slice(0, 400);
@@ -271,7 +271,7 @@ export async function aiSummary(title, rows) {  const sample = JSON.stringify((r
 export async function aiText({ system, user, json = false, maxTokens = 400 }) {
   return runChain('text', async p => {
     if (p === 'gemini') return (await geminiCall({ system, text: user, json, maxTokens })).trim();
-    const base = p === 'groq' ? 'https://api.groq.com/openai' : p === 'kaggle' ? baseUrl() : 'https://openrouter.ai/api';
+    const base = p === 'groq' ? 'https://api.groq.com/openai' : p === 'kaggle' ? await baseUrl() : 'https://openrouter.ai/api';
     const key = p === 'groq' ? (process.env.GROQ_API_KEY || '') : p === 'kaggle' ? (process.env.LLM_API_KEY || '') : (process.env.OPENROUTER_API_KEY || '');
     const modelName = p === 'groq' ? GROQ_MODEL() : p === 'kaggle' ? KAGGLE_MODEL() : OR_MODEL();
     return (await openaiChat({ base, key, modelName, messages: [{ role: 'system', content: system }, { role: 'user', content: user }], json, maxTokens, referer: p === 'openrouter' })).trim();
